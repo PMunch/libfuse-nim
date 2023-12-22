@@ -17,5 +17,4 @@ Things implemented:
   the content of which can be controlled with options on startup.
 - `jsonfile.nim` takes a JSON object as a string as an option and mounts one
   file per key, and a directory for each object and array. Keys can be written,
-  and on unmount the final object is written out. Currently it is not possible
-  to create new keys, only overriding existing ones.
+  and on unmount the final object is written out.

@@ -1,4 +1,4 @@
-import json, strutils
+import json, strutils, os
 import libfuse
 
 
@@ -34,6 +34,7 @@ proc hasPath(data: JsonNode, path: string): bool =
     else: return false
   return true
 
+let errorSentinel = %"this is an error"
 proc getPath(data: JsonNode, path: string): JsonNode =
   let paths = path.split "/"
   result = data
@@ -43,7 +44,7 @@ proc getPath(data: JsonNode, path: string): JsonNode =
       result = result[path]
     elif result.kind == JArray and result.len > parseInt(path):
       result = result[parseInt(path)]
-    else: return newJNull()
+    else: return errorSentinel
 
 proc hello_init(conn: ptr structFuseConnInfo, cfg: ptr structFuseConfig): pointer {.exportc, cdecl.} =
   cfg.kernel_cache = 1
@@ -56,12 +57,11 @@ proc `$`(x: JsonNode): string =
 proc hello_getattr(path: cstring, stbuf: ptr struct_stat, fi: ptr struct_fuse_file_info): cint {.exportc, cdecl.} =
   stbuf.zeroMem(sizeof(struct_stat))
   let node = contents.getPath($path)
+  if node == errorSentinel: return -ENOENT
   case node.kind:
   of JObject, JArray:
     stbuf.stMode = (S_IFDIR or 0o755).compilerModeT
     stbuf.stNlink = 2
-  of JNull:
-    return -ENOENT
   else:
     stbuf.stMode = (S_IFREG or 0o644).compilerModeT
     stbuf.stNlink = 1
@@ -86,15 +86,12 @@ proc hello_readdir(path: cstring, buf: pointer, filler: fuse_fill_dir_t,
 
 proc hello_open(path: cstring, fi: ptr struct_fuse_file_info): cint {.exportc, cdecl.} =
   let node = contents.getPath($path)
-  if node.kind == JNull:
+  if node == errorSentinel:
     return -ENOENT
-
-  #if (fi.flags and O_ACCMODE) != O_RDONLY:
-  #  return -EACCES
 
 proc hello_read(path: cstring, buf: cstring, size: csizeT, offset: offT, fi: ptr struct_fuse_file_info): cint {.exportc, cdecl.} =
   let node = contents.getPath($path)
-  if node.kind == JNull:
+  if node == errorSentinel:
     return -ENOENT
 
   let
@@ -115,7 +112,7 @@ proc hello_write(path: cstring, buf: cstring, size: csizeT, offset: offT, fi: pt
     else: true
 
   var node = contents.getPath($path)
-  if node.kind == JNull:
+  if node == errorSentinel:
     return -ENOENT
 
   var fcontent = $node
@@ -145,6 +142,32 @@ proc hello_write(path: cstring, buf: cstring, size: csizeT, offset: offT, fi: pt
   else:
     node[] = (%fcontent)[]
 
+proc hello_create(path: cstring, mode: mode_t, fi: ptr struct_fuse_file_info): cint {.exportc, cdecl.} =
+  let split = ($path).splitPath
+  try:
+    var node = contents.getPath(split.head)
+    case node.kind:
+    of JObject:
+      if split.tail == "0" and node.len == 0:
+        let nsplit = split.head.splitPath
+        contents.getPath(nsplit.head)[nsplit.tail] = %*[nil]
+      else:
+        node[split.tail] = newJNull()
+    of JArray:
+      if split.tail.parseInt == node.len:
+        node.add newJNull()
+      else: return -ENOENT
+    else:
+      return -ENOENT
+  except:
+    return -ENOENT
+
+proc hello_mkdir(path: cstring, mode: modeT): cint {.exportc, cdecl.} =
+  let split = ($path).splitPath
+  var node = contents.getPath(split.head)
+  if node == errorSentinel: return -ENOENT
+  node[split.tail] = newJObject()
+
 proc hello_destroy(data: pointer) {.exportc, cdecl.} =
   echo contents
 
@@ -155,14 +178,22 @@ let hello_oper = struct_fuse_operations(
     open: hello_open,
     read: hello_read,
     write: hello_write,
+    create: hello_create,
+    mkdir: hello_mkdir,
     destroy: hello_destroy
   )
 
 proc show_help(progname: cstring) =
-  echo "usage: ", progname, " [options] <mountpoint>\n"
-  echo "File-system specific options:\n",
-         "    --contents=<s>      Contents \"hello\" file\n",
-         "                        (default \"Hello, World!\\n\")\n"
+  echo "usage: ", progname, " [options] <mountpoint>\n",
+       "Mounts a filesystem backed by an in-memory JSON object. On unmount prints\n",
+       "the JSON object as a string to stdout. All values are represented as text\n",
+       "in files, and in JSON as base types if possible. Objects and arrays are\n",
+       "stored as directories. All empty folders are empty objects, and folders\n",
+       "with only files named with numbers in contiguous rising order starting\n",
+       "from '0' are considered arrays.\n\n",
+       "File-system specific options:\n",
+       "    --contents=<s>         Contents of the mounted directory as a JSON\n",
+       "                           object. Default: '{\"hello\": \"Hello World\"}'\n\n"
 
 var
   cmdCount {.importc: "cmdCount".}: cint
